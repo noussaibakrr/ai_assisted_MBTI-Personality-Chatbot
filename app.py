@@ -1,8 +1,6 @@
-from flask import Flask, request, jsonify, render_template
+import gradio as gr
 from transformers import pipeline
 import logging
-
-app = Flask(__name__)
 
 # ---------------- LOGGING ---------------- #
 logging.basicConfig(level=logging.INFO)
@@ -10,9 +8,10 @@ logger = logging.getLogger(__name__)
 
 # ---------------- MODEL LOADER ---------------- #
 print("Loading FLAN-T5 Model...")
+# Use flan-t5-base; can switch to flan-t5-small if memory is tight
 nlu_model = pipeline(
-    "text2text-generation", 
-    model="google/flan-t5-base", 
+    "text2text-generation",
+    model="google/flan-t5-base",
     framework="pt"
 )
 print("Model Loaded Successfully!")
@@ -375,91 +374,76 @@ KEYWORDS = {
 }
 # ---------------- LOGIC ENGINE ---------------- #
 def analyze_dimension(text, label_a, label_b, char_a, char_b):
-    """
-    1. Checks for specific keywords (Strongest Signal).
-    2. If no keywords found, asks FLAN-T5 (AI Signal).
-    """
-    # FIX: Use 'text' (the argument), not 'user_text'
-    text_lower = text.lower() 
-
-    # --- STEP 1: KEYWORD COUNTING ---
-    # We count how many words from each list appear in the user's text
-    # Make sure the KEYWORDS dictionary is defined at the top of your file!
+    text_lower = text.lower()
     score_a = sum(1 for w in KEYWORDS[char_a] if w in text_lower)
     score_b = sum(1 for w in KEYWORDS[char_b] if w in text_lower)
 
-    # If one side has significantly more keywords, return immediately
     if score_a > 0 and score_a > score_b:
-        print(f"Keyword Logic: Found {score_a} words for {char_a} (vs {score_b}) -> {char_a}")
         return char_a
     elif score_b > 0 and score_b > score_a:
-        print(f"Keyword Logic: Found {score_b} words for {char_b} (vs {score_a}) -> {char_b}")
         return char_b
 
-    # --- STEP 2: AI MODEL CHECK (Tie-Breaker) ---
-    prompt = f"""
-    Classify this text.
-    Text: "{text}"
-    Is the speaker more "{label_a}" or "{label_b}"?
-    Answer (one word):
-    """
-    
+    # AI-based fallback
+    prompt = f'Classify this text: "{text}" as "{label_a}" or "{label_b}".'
     try:
         output = nlu_model(prompt, max_new_tokens=10, do_sample=False)[0]["generated_text"]
         clean_out = output.strip().lower()
-
-        print(f"[{label_a} vs {label_b}] Model Output: '{clean_out}'")
-
-        if label_a.lower() in clean_out or clean_out in label_a.lower():
+        if label_a.lower() in clean_out:
             return char_a
-        elif label_b.lower() in clean_out or clean_out in label_b.lower():
+        if label_b.lower() in clean_out:
             return char_b
-        
-        # --- STEP 3: FINAL FALLBACK ---
-        print(f"Fallback: Defaulting to {char_a}")
         return char_a
-
     except Exception as e:
         logger.error(f"NLU Error: {e}")
         return char_a
-# ---------------- ROUTES ---------------- #
 
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-@app.route("/predict", methods=["POST"])
-def predict():
-    data = request.json
-    user_text = data.get("text", "")
-    
+# ---------------- MBTI PREDICTION ---------------- #
+def predict_mbti(user_text):
     if not user_text:
-        return jsonify({"error": "No text provided"}), 400
+        return "No text provided."
 
-    print("------------------------------------------------")
-    print(f"Analyzing User Input: {user_text[:50]}...")
-
-    # 1. I vs E (Using simple labels)
+    # 1. I vs E
     dim_ie = analyze_dimension(user_text, "Introverted", "Extroverted", "I", "E")
-    
     # 2. S vs N
     dim_sn = analyze_dimension(user_text, "Realistic", "Imaginative", "S", "N")
-    
     # 3. T vs F
     dim_tf = analyze_dimension(user_text, "Logical", "Emotional", "T", "F")
-    
-    # 4. J vs P (Simplified labels to fix the bug!)
+    # 4. J vs P
     dim_jp = analyze_dimension(user_text, "Structured", "Spontaneous", "J", "P")
 
     final_mbti = f"{dim_ie}{dim_sn}{dim_tf}{dim_jp}"
-    print(f"FINAL RESULT CALCULATED: {final_mbti}")
-    print("------------------------------------------------")
-    
-    # Fetch result, default to INTJ if somehow invalid
-    result_data = MMBTI_DATA.get(final_mbti, MMBTI_DATA["INTJ"])
-    result_data["mbti"] = final_mbti 
 
-    return jsonify(result_data)
+    # Fetch MBTI data
+    result_data = MMBTI_DATA.get(final_mbti, MMBTI_DATA["INTJ"])
+    result_data["mbti"] = final_mbti
+
+    # Return nicely formatted string
+    description = "\n".join(result_data["description"])
+    long_desc = result_data.get("long_description", "")
+    characters = ", ".join([c["name"] for c in result_data.get("characters", [])])
+
+    return f"""
+MBTI Type: {final_mbti} ({result_data['name']})
+Population: {result_data['population']}
+Color: {result_data['color']}
+
+Description:
+{description}
+
+Long Description:
+{long_desc}
+
+Characters: {characters}
+"""
+
+# ---------------- GRADIO INTERFACE ---------------- #
+iface = gr.Interface(
+    fn=predict_mbti,
+    inputs=gr.Textbox(lines=5, placeholder="Type your text here..."),
+    outputs=gr.Textbox(label="MBTI Prediction"),
+    title="AI-Assisted MBTI Personality Chatbot",
+    description="Enter a text and the model will predict your MBTI type."
+)
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    iface.launch()
